@@ -162,12 +162,20 @@ export interface StartServerOptions {
 // accumulate listeners.
 const liveRegistries = new Set<Map<string, CallSession>>();
 let signalsWired = false;
+let draining = false;
 function wireDrainSignals(): void {
   if (signalsWired) {
     return;
   }
   signalsWired = true;
   const drain = (sig: string): void => {
+    // A second signal during the drain grace means the operator wants OUT NOW
+    // (a process.once handler would silently ignore it and keep waiting).
+    if (draining) {
+      log.warn(`${sig} received again during drain; exiting immediately`);
+      process.exit(1);
+    }
+    draining = true;
     const sessions = [...liveRegistries].flatMap((m) => [...m.values()]);
     log.info(`${sig}: draining ${sessions.length} live call(s)`);
     for (const s of sessions) {
@@ -182,8 +190,8 @@ function wireDrainSignals(): void {
     // (only if there were live calls), then exit no matter what.
     setTimeout(() => process.exit(0), sessions.length > 0 ? SHUTDOWN_GRACE_MS : 0);
   };
-  process.once("SIGTERM", () => drain("SIGTERM"));
-  process.once("SIGINT", () => drain("SIGINT"));
+  process.on("SIGTERM", () => drain("SIGTERM"));
+  process.on("SIGINT", () => drain("SIGINT"));
 }
 
 export function startServer(

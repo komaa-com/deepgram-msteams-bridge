@@ -72,7 +72,7 @@ const tools = [
 ];
 
 // 4. Start the bridge. StandIn dials {your-url}/{callId} per call with an
-//    HMAC-signed upgrade; one OpenAI Realtime session is opened per call.
+//    HMAC-signed upgrade; one Deepgram Voice Agent session is opened per call.
 //    handleSignals: true opts into the built-in SIGINT/SIGTERM drain, which
 //    ends every live call cleanly and THEN EXITS THE PROCESS - only enable it
 //    when the bridge owns the process (as in this example).

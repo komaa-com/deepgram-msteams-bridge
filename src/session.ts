@@ -28,7 +28,7 @@ import {
 } from "./deepgram.js";
 import { makeVisionDescriber, type VisionDescriber } from "./vision.js";
 import { fetchPublicImage } from "./ssrf.js";
-import { metricInc } from "./metrics.js";
+import { metricInc, metricObserve } from "./metrics.js";
 
 /** show_image fetch cap: display.image goes to a small video tile; 5 MB is generous. */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -115,9 +115,15 @@ export class CallSession {
   private lastSpeakerName: string | null = null;
   private lastSpeakerUpdateMs = 0;
   private participantCount = 1;
-  // caller audio arriving while the Deepgram socket is still connecting (session.start -> Welcome)
+  // Caller audio buffered until the session is READY: from session.start
+  // through connect AND the server's SettingsApplied ack. The documented flow
+  // is explicit - no audio before SettingsApplied.
   private pendingAudio: string[] = [];
   private sessionStarted = false;
+  private settingsApplied = false;
+  // bound the SettingsApplied wait: a hung Settings application must not leave
+  // the call open and silent forever
+  private settingsTimer: NodeJS.Timeout | null = null;
   // per-call caller context for prompt (re)builds
   private callerCtx: CallerContext | null = null;
   // live context notes (participants/dtmf/speaker) carried in the prompt - the
@@ -212,10 +218,10 @@ export class CallSession {
         break;
       case "audio.frame":
         // hot path: caller audio -> agent, verbatim (base64 -> binary frame).
-        // While the Deepgram socket is still connecting, buffer (bounded)
-        // instead of dropping the caller's first words; flushed right after
-        // Settings is sent.
-        if (this.dg) {
+        // Until the server acks Settings (SettingsApplied), buffer (bounded)
+        // instead of sending: the documented flow forbids audio before the
+        // ack, and this window also covers the connect itself.
+        if (this.dg && this.settingsApplied) {
           this.dg.sendAudioChunk(msg.payloadBase64);
           metricInc("bridge_frames_to_agent_total");
           this.noteSpeaker(msg.speakerName);
@@ -340,16 +346,23 @@ export class CallSession {
         thinkProvider: this.cfg.thinkProvider,
         thinkModel: this.cfg.thinkModel,
         speakModel: this.cfg.speakModel,
+        thinkEndpointUrl: this.cfg.thinkEndpointUrl,
+        thinkEndpointHeaders: this.cfg.thinkEndpointHeaders,
         greeting: this.cfg.greeting,
         extraFunctions: [...this.customTools.values()].map(customToolSchema),
       }),
     );
-    // flush caller audio buffered while the socket was connecting
-    for (const chunk of this.pendingAudio) {
-      this.dg.sendAudioChunk(chunk);
-    }
-    this.pendingAudio = [];
-    this.log.info("Deepgram Voice Agent session open; relaying");
+    // Audio must wait for the server's SettingsApplied ack (see onDgMessage);
+    // bound that wait so a hung Settings application cannot leave the call
+    // open and silent until the dead-peer timer.
+    this.settingsTimer = setTimeout(() => {
+      if (!this.settingsApplied && !this.closed) {
+        this.log.error("no SettingsApplied from Deepgram within 10s; ending the call");
+        this.endCall("agent-unavailable");
+      }
+    }, 10_000);
+    this.settingsTimer.unref?.();
+    this.log.info("Deepgram Voice Agent session open; waiting for SettingsApplied");
 
     // Bridge-side governor: Deepgram doesn't know about your billing.
     if (this.cfg.maxCallMinutes > 0) {
@@ -367,6 +380,13 @@ export class CallSession {
       return;
     }
     this.log.info("governor: call time limit reached");
+    // If the worker-side governor already started a goodbye, its hard-bounded
+    // backstop is armed - do NOT overwrite that timer (the call ends either
+    // way, and clobbering it could cut off a goodbye that is still playing).
+    if (this.goodbyeInProgress) {
+      this.log.info("a goodbye is already in progress; keeping its deadline");
+      return;
+    }
     // Guarantee teardown regardless of the goodbye. Arm a HARD-bounded
     // deadline BEFORE awaiting performGoodbye - a hung/slow TTS must never
     // wedge the call open past its limit.
@@ -504,8 +524,25 @@ export class CallSession {
         this.log.warn(`Deepgram warning: ${(msg as DgWarning).description ?? "no description"}`);
         break;
       }
+      case "SettingsApplied": {
+        // The server is ready for audio (documented ordering contract). Flush
+        // the caller speech buffered since session.start, oldest first.
+        this.settingsApplied = true;
+        if (this.settingsTimer) {
+          clearTimeout(this.settingsTimer);
+          this.settingsTimer = null;
+        }
+        if (this.dg) {
+          for (const chunk of this.pendingAudio) {
+            this.dg.sendAudioChunk(chunk);
+            metricInc("bridge_frames_to_agent_total");
+          }
+        }
+        this.pendingAudio = [];
+        this.log.info("SettingsApplied; relaying");
+        break;
+      }
       case "Welcome":
-      case "SettingsApplied":
       case "AgentThinking":
       case "AgentAudioDone":
       case "PromptUpdated":
@@ -671,6 +708,17 @@ export class CallSession {
       );
       return;
     }
+    // Optional compliance gate: camera/screen frames are PII-bearing, so
+    // deployments can require Teams recording to be active before any frame
+    // is sent to the vision endpoint.
+    if (this.cfg.visionRequiresRecording && !this.recordingActive) {
+      this.replyTool(
+        id,
+        name,
+        "cannot inspect video: Teams recording is not active and this bridge requires recording before frames may be processed",
+      );
+      return;
+    }
     const question =
       typeof params.question === "string" && params.question.trim()
         ? params.question.trim()
@@ -733,8 +781,11 @@ export class CallSession {
         // frame, so playback does not depend on the worker re-aligning a giant
         // chunk (parity with normal relay). emitAudioToWorker is used directly:
         // the mute latch only filters AGENT audio (onDgAudio), not the goodbye.
+        // The goodbye is the LAST thing the caller hears - a load-bearing
+        // utterance, not disposable realtime audio. Never drop it under
+        // worker backpressure (undroppable), unlike the normal hot path.
         for (let off = 0; off < pcm.length; off += PCM16K_FRAME_BYTES) {
-          this.emitAudioToWorker(pcm.subarray(off, off + PCM16K_FRAME_BYTES).toString("base64"));
+          this.emitAudioToWorker(pcm.subarray(off, off + PCM16K_FRAME_BYTES).toString("base64"), true);
         }
         return pcm16kBytesToMs(pcm.length);
       } catch (err) {
@@ -751,7 +802,7 @@ export class CallSession {
 
   // ---- plumbing ----
 
-  private emitAudioToWorker(base64Pcm: string): void {
+  private emitAudioToWorker(base64Pcm: string, undroppable = false): void {
     const frame: AudioFrameMessage = {
       type: "audio.frame",
       seq: this.outSeq++,
@@ -761,10 +812,10 @@ export class CallSession {
     // advance the timeline by the actual PCM duration (base64 -> bytes -> ms)
     this.outTimestampMs += pcm16kBytesToMs(Buffer.byteLength(base64Pcm, "base64"));
     metricInc("bridge_frames_to_worker_total");
-    this.sendToWorker(frame);
+    this.sendToWorker(frame, undroppable);
   }
 
-  private sendToWorker(msg: WorkerOutbound): void {
+  private sendToWorker(msg: WorkerOutbound, undroppable = false): void {
     if (this.worker.readyState !== this.worker.OPEN) {
       return;
     }
@@ -778,7 +829,9 @@ export class CallSession {
     // has already been told succeeded - silently dropping it would desync the
     // agent's belief from what the caller sees. A stalled-then-recovered worker
     // must not miss a barge-in cancel, a hangup, or a promised image.
-    const droppable = msg.type === "audio.frame";
+    // (Goodbye TTS frames are audio.frame on the wire but semantically a
+    // control utterance - performGoodbye marks them undroppable.)
+    const droppable = msg.type === "audio.frame" && !undroppable;
     if (droppable && this.worker.bufferedAmount > MAX_OUTBOUND_BUFFER_BYTES) {
       // Throttle the log: at ~50 frames/s a stalled worker would emit 50 warn
       // lines/s. Count drops and warn at most once per second with the total.
@@ -817,8 +870,10 @@ export class CallSession {
     }
     this.closed = true;
     this.log.info(`teardown: ${reason}`);
-    // call duration (fractional seconds; Prometheus counters may be floats)
-    metricInc("bridge_call_seconds_total", (Date.now() - this.startMs) / 1000);
+    // call duration: cumulative counter (averages) + histogram (p50/p95/p99)
+    const durationS = (Date.now() - this.startMs) / 1000;
+    metricInc("bridge_call_seconds_total", durationS);
+    metricObserve("bridge_call_duration_seconds", durationS);
     // symmetry: the mute latch must never outlive the goodbye that set it
     this.muteAgentAudio = false;
     if (this.governorTimer) {
@@ -832,6 +887,10 @@ export class CallSession {
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = null;
+    }
+    if (this.settingsTimer) {
+      clearTimeout(this.settingsTimer);
+      this.settingsTimer = null;
     }
     try {
       this.dg?.close();

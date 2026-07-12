@@ -33,6 +33,14 @@ export interface BridgeConfig {
   thinkModel: string;
   /** TTS voice model for agent.speak (e.g. aura-2-thalia-en). */
   speakModel: string;
+  /**
+   * BYO-LLM endpoint for agent.think - REQUIRED by Deepgram for third-party
+   * think providers (google, groq, aws_bedrock, ...); Deepgram-managed
+   * open_ai/anthropic work without it. Deepgram dials this URL itself.
+   */
+  thinkEndpointUrl: string | null;
+  /** Headers for the think endpoint (JSON object, e.g. {"authorization": "Bearer ..."}). */
+  thinkEndpointHeaders: Record<string, string> | null;
   /** Agent language (per Deepgram, e.g. "en"). */
   language: string;
   /** Base agent prompt. Null = a built-in default; per-call caller context is appended either way. */
@@ -47,6 +55,12 @@ export interface BridgeConfig {
   visionApiKey: string | null;
   /** Vision model name (required when visionApiUrl is set). */
   visionModel: string | null;
+  /**
+   * Gate the look tool on Teams recording being active. Camera/screen frames
+   * are PII-bearing; when true, the bridge refuses to send a frame to the
+   * vision endpoint unless recording.status is "active".
+   */
+  visionRequiresRecording: boolean;
   /**
    * Bridge-side call governor: hard cap on call duration in minutes
    * (fractional allowed). 0 = disabled. Deepgram doesn't know about your
@@ -128,6 +142,54 @@ function validateVisionUrl(raw: string | null): string | null {
   return raw;
 }
 
+/**
+ * The think endpoint is dialed BY DEEPGRAM (not this bridge), so the SSRF
+ * posture is simply: https only, well-formed, no embedded credentials
+ * (credentials belong in the headers object).
+ */
+function validateThinkEndpointUrl(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`DEEPGRAM_THINK_ENDPOINT_URL "${raw}" is not a valid URL`);
+  }
+  if (url.protocol !== "https:") {
+    throw new Error(`DEEPGRAM_THINK_ENDPOINT_URL "${raw}" must be https (Deepgram dials it)`);
+  }
+  if (url.username || url.password) {
+    throw new Error("DEEPGRAM_THINK_ENDPOINT_URL must not contain embedded credentials; use DEEPGRAM_THINK_ENDPOINT_HEADERS");
+  }
+  return raw;
+}
+
+/** Parse DEEPGRAM_THINK_ENDPOINT_HEADERS: a JSON object of string values. Fail loud on junk. */
+function parseThinkEndpointHeaders(raw: string | null): Record<string, string> | null {
+  if (!raw || !raw.trim()) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('DEEPGRAM_THINK_ENDPOINT_HEADERS is not valid JSON (expected {"header": "value"})');
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("DEEPGRAM_THINK_ENDPOINT_HEADERS must be a JSON object");
+  }
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof v !== "string") {
+      throw new Error(`DEEPGRAM_THINK_ENDPOINT_HEADERS["${k}"] must be a string`);
+    }
+    headers[k] = v;
+  }
+  return headers;
+}
+
 function required(name: string): string {
   const v = process.env[name];
   if (!v || !v.trim()) {
@@ -177,6 +239,8 @@ export function loadConfig(): BridgeConfig {
     thinkProvider: process.env.DEEPGRAM_THINK_PROVIDER?.trim() || "open_ai",
     thinkModel: process.env.DEEPGRAM_THINK_MODEL?.trim() || "gpt-4o-mini",
     speakModel: process.env.DEEPGRAM_SPEAK_MODEL?.trim() || "aura-2-thalia-en",
+    thinkEndpointUrl: validateThinkEndpointUrl(optional("DEEPGRAM_THINK_ENDPOINT_URL")),
+    thinkEndpointHeaders: parseThinkEndpointHeaders(optional("DEEPGRAM_THINK_ENDPOINT_HEADERS")),
     language: process.env.DEEPGRAM_LANGUAGE?.trim() || "en",
     instructions: optional("DEEPGRAM_PROMPT"),
     greeting: optional("DEEPGRAM_GREETING"),
@@ -189,6 +253,7 @@ export function loadConfig(): BridgeConfig {
     visionApiUrl: validateVisionUrl(optional("VISION_API_URL")),
     visionApiKey: optional("VISION_API_KEY"),
     visionModel: optional("VISION_MODEL"),
+    visionRequiresRecording: process.env.VISION_REQUIRES_RECORDING === "true",
     hmacFreshnessMs: numFromEnv("HMAC_FRESHNESS_MS", 60_000),
     maxConnections: numFromEnv("MAX_CONNECTIONS", 0),
     maxConnectionsPerIp: numFromEnv("MAX_CONNECTIONS_PER_IP", 0),

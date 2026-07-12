@@ -23,6 +23,35 @@ export function metricInc(name: keyof typeof META, by = 1): void {
   counts.set(name, (counts.get(name) ?? 0) + by);
 }
 
+/** Call-duration histogram: what telephony ops actually query (p50/p95/p99). */
+const HISTOGRAMS: Record<string, { help: string; buckets: number[] }> = {
+  bridge_call_duration_seconds: {
+    help: "Call duration distribution in seconds",
+    buckets: [30, 60, 120, 300, 600, 1200, 1800, 3600],
+  },
+};
+
+const histData = new Map<string, { counts: number[]; sum: number; count: number }>();
+
+export function metricObserve(name: keyof typeof HISTOGRAMS, value: number): void {
+  const def = HISTOGRAMS[name];
+  if (!def) {
+    return;
+  }
+  let h = histData.get(name);
+  if (!h) {
+    h = { counts: def.buckets.map(() => 0), sum: 0, count: 0 };
+    histData.set(name, h);
+  }
+  for (let i = 0; i < def.buckets.length; i++) {
+    if (value <= def.buckets[i]) {
+      h.counts[i]++;
+    }
+  }
+  h.sum += value;
+  h.count++;
+}
+
 export function metricDec(name: keyof typeof META): void {
   metricInc(name, -1);
 }
@@ -33,6 +62,17 @@ export function renderMetrics(): string {
     lines.push(`# HELP ${name} ${meta.help}`);
     lines.push(`# TYPE ${name} ${meta.type}`);
     lines.push(`${name} ${counts.get(name) ?? 0}`);
+  }
+  for (const [name, def] of Object.entries(HISTOGRAMS)) {
+    const h = histData.get(name) ?? { counts: def.buckets.map(() => 0), sum: 0, count: 0 };
+    lines.push(`# HELP ${name} ${def.help}`);
+    lines.push(`# TYPE ${name} histogram`);
+    for (let i = 0; i < def.buckets.length; i++) {
+      lines.push(`${name}_bucket{le="${def.buckets[i]}"} ${h.counts[i]}`);
+    }
+    lines.push(`${name}_bucket{le="+Inf"} ${h.count}`);
+    lines.push(`${name}_sum ${h.sum}`);
+    lines.push(`${name}_count ${h.count}`);
   }
   return lines.join("\n") + "\n";
 }

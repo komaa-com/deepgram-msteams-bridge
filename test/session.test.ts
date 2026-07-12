@@ -18,6 +18,8 @@ const cfg: BridgeConfig = {
   thinkProvider: "open_ai",
   thinkModel: "gpt-4o-mini",
   speakModel: "aura-2-thalia-en",
+  thinkEndpointUrl: null,
+  thinkEndpointHeaders: null,
   language: "en",
   instructions: null,
   greeting: null,
@@ -28,6 +30,7 @@ const cfg: BridgeConfig = {
   visionApiUrl: null,
   visionApiKey: null,
   visionModel: null,
+  visionRequiresRecording: false,
   hmacFreshnessMs: 60_000,
   maxConnections: 0,
   maxConnectionsPerIp: 0,
@@ -160,12 +163,34 @@ test("full relay: settings, audio both ways, barge-in ghosts, ping/pong, context
   assert.equal(audio.input.sample_rate, 16_000, "the wire rate - copy-only relay");
   assert.equal(audio.output.sample_rate, 16_000);
   assert.equal(audio.output.container, "none");
-  const agent = settings.agent as { think: { prompt: string; functions: Array<{ name: string }> }; greeting?: string };
+  const agent = settings.agent as {
+    language?: string;
+    listen: { provider: { language: string } };
+    speak: { provider: { language: string } };
+    think: { prompt: string; functions: Array<{ name: string }>; endpoint?: unknown };
+    greeting?: string;
+  };
   assert.match(agent.think.prompt, /Alaa/);
   assert.match(agent.think.prompt, /unknown-tenant/, "nullable tenant defaulted, never null");
   assert.match(agent.think.prompt, /inbound call/);
   assert.deepEqual(agent.think.functions.map((f) => f.name).sort(), ["end_call", "express", "look", "show_image"]);
   assert.equal("greeting" in agent, false, "no greeting configured -> field omitted");
+  assert.equal("endpoint" in agent.think, false, "no BYO-LLM endpoint configured -> field omitted");
+  // language rides the providers, not the deprecated top-level agent.language
+  assert.equal("language" in agent, false, "agent.language is deprecated and must not be sent");
+  assert.equal(agent.listen.provider.language, "en");
+  assert.equal(agent.speak.provider.language, "en");
+
+  // documented ordering contract: NO audio before the server acks Settings
+  ws.send(JSON.stringify({ type: "audio.frame", seq: 0, timestampMs: 0, payloadBase64: "ZWFybHk=" }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(
+    fakeAgent.sent.some((m) => m.type === "binary_audio"),
+    false,
+    "caller audio must be buffered until SettingsApplied",
+  );
+  fakeAgent.emit({ type: "SettingsApplied" });
+  await until(() => fakeAgent.sent.find((m) => m.type === "binary_audio" && m.audio === "ZWFybHk="));
 
   // caller audio -> agent verbatim (base64 payload becomes a binary frame)
   ws.send(JSON.stringify({ type: "audio.frame", seq: 1, timestampMs: 20, payloadBase64: "UENNMTZL" }));
@@ -463,6 +488,16 @@ test("caller audio during connect is buffered and flushed after Settings; duplic
   await new Promise((r) => setTimeout(r, 40));
   releaseConnect();
 
+  // the socket is open and Settings sent, but the server has not acked yet -
+  // nothing may flush
+  await until(() => fakeAgentE.sent.find((m) => m.type === "Settings"));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(
+    fakeAgentE.sent.some((m) => m.type === "binary_audio"),
+    false,
+    "no audio before the SettingsApplied ack",
+  );
+  fakeAgentE.emit({ type: "SettingsApplied" });
   await until(() => (fakeAgentE.sent.filter((m) => m.type === "binary_audio").length >= 2 ? true : undefined));
   const chunks = fakeAgentE.sent.filter((m) => m.type === "binary_audio").map((m) => m.audio);
   assert.deepEqual(chunks, ["Zmlyc3Q=", "c2Vjb25k"], "buffered frames flush in order");
@@ -579,4 +614,93 @@ test("GET /metrics exposes call/relay counters in Prometheus format", async () =
   assert.match(body, /bridge_frames_to_worker_total [1-9]/);
   assert.match(body, /bridge_call_seconds_total (0\.0*[1-9]|[1-9])/, "call durations must accumulate");
   assert.match(body, /# TYPE bridge_calls_active gauge/);
+});
+
+test("BYO-LLM think endpoint is threaded into Settings", async () => {
+  const fakeAgentF = new FakeAgent();
+  const connectDgF = async (_c: BridgeConfig, _l: unknown, handlers: DgSessionHandlers): Promise<AgentPort> => {
+    fakeAgentF.handlers = handlers;
+    return fakeAgentF;
+  };
+  const serverF = startServer(
+    {
+      ...cfg,
+      thinkProvider: "google",
+      thinkModel: "gemini-2.0-flash",
+      thinkEndpointUrl: "https://llm.example.com/v1/chat",
+      thinkEndpointHeaders: { authorization: "Bearer tok" },
+    },
+    connectDgF,
+    null,
+  );
+  await new Promise<void>((r) => serverF.once("listening", () => r()));
+  const portF = (serverF.address() as AddressInfo).port;
+
+  const callId = "call-think-1";
+  const ts = Date.now();
+  const ws = new WebSocket(`ws://127.0.0.1:${portF}/voice/msteams/stream/${callId}`, {
+    headers: { "X-StandIn-Timestamp": String(ts), "X-StandIn-Signature": sign(cfg.workerSharedSecret, ts, callId) },
+  });
+  await new Promise<void>((r) => ws.once("open", () => r()));
+  ws.send(JSON.stringify({ type: "session.start", callId, threadId: "t", caller: {} }));
+  const settings = await until(() => fakeAgentF.sent.find((m) => m.type === "Settings"));
+  const think = (settings.agent as Record<string, unknown>).think as {
+    provider: { type: string; model: string };
+    endpoint: { url: string; headers: Record<string, string> };
+  };
+  assert.equal(think.provider.type, "google");
+  assert.equal(think.endpoint.url, "https://llm.example.com/v1/chat");
+  assert.deepEqual(think.endpoint.headers, { authorization: "Bearer tok" });
+  ws.close();
+  serverF.close();
+});
+
+test("VISION_REQUIRES_RECORDING gates the look tool on the Teams recording state", async () => {
+  const fakeAgentG = new FakeAgent();
+  const connectDgG = async (_c: BridgeConfig, _l: unknown, handlers: DgSessionHandlers): Promise<AgentPort> => {
+    fakeAgentG.handlers = handlers;
+    return fakeAgentG;
+  };
+  const serverG = startServer(
+    { ...cfg, visionRequiresRecording: true },
+    connectDgG,
+    async (frame) => `described ${frame.source}`,
+  );
+  await new Promise<void>((r) => serverG.once("listening", () => r()));
+  const portG = (serverG.address() as AddressInfo).port;
+
+  const callId = "call-visgate-1";
+  const ts = Date.now();
+  const ws = new WebSocket(`ws://127.0.0.1:${portG}/voice/msteams/stream/${callId}`, {
+    headers: { "X-StandIn-Timestamp": String(ts), "X-StandIn-Signature": sign(cfg.workerSharedSecret, ts, callId) },
+  });
+  await new Promise<void>((r) => ws.once("open", () => r()));
+  ws.send(JSON.stringify({ type: "session.start", callId, threadId: "t", caller: {} }));
+  await until(() => fakeAgentG.sent.find((m) => m.type === "Settings"));
+  ws.send(JSON.stringify({
+    type: "video.frame", source: "camera", ts: 1, width: 640, height: 360,
+    mime: "image/jpeg", dataBase64: Buffer.from("cam").toString("base64"),
+  }));
+  await new Promise((r) => setTimeout(r, 30));
+
+  // recording NOT active -> refused
+  fakeAgentG.emit({ type: "FunctionCallRequest", functions: [{ id: "g1", name: "look", arguments: "{}", client_side: true }] });
+  await until(() => fakeAgentG.sent.find((m) => m.id === "g1" && String(m.content).includes("requires recording")));
+
+  // recording active -> described
+  ws.send(JSON.stringify({ type: "recording.status", status: "active" }));
+  await new Promise((r) => setTimeout(r, 30));
+  fakeAgentG.emit({ type: "FunctionCallRequest", functions: [{ id: "g2", name: "look", arguments: "{}", client_side: true }] });
+  await until(() => fakeAgentG.sent.find((m) => m.id === "g2" && m.content === "described camera"));
+  ws.close();
+  serverG.close();
+});
+
+test("GET /metrics exposes a call-duration histogram", async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/metrics`);
+  const body = await res.text();
+  assert.match(body, /# TYPE bridge_call_duration_seconds histogram/);
+  assert.match(body, /bridge_call_duration_seconds_bucket\{le="30"\} \d+/);
+  assert.match(body, /bridge_call_duration_seconds_bucket\{le="\+Inf"\} [1-9]/, "completed calls must be observed");
+  assert.match(body, /bridge_call_duration_seconds_count [1-9]/);
 });

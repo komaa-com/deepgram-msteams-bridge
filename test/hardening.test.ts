@@ -18,6 +18,8 @@ const baseCfg: BridgeConfig = {
   thinkProvider: "open_ai",
   thinkModel: "gpt-4o-mini",
   speakModel: "aura-2-thalia-en",
+  thinkEndpointUrl: null,
+  thinkEndpointHeaders: null,
   language: "en",
   instructions: null,
   greeting: null,
@@ -25,6 +27,7 @@ const baseCfg: BridgeConfig = {
   visionApiUrl: null,
   visionApiKey: null,
   visionModel: null,
+  visionRequiresRecording: false,
   maxCallMinutes: 0,
   goodbyeText: "bye",
   goodbyeGraceMs: 8000,
@@ -152,6 +155,38 @@ test("VISION_API_URL is validated at config load", () => {
 
     process.env.VISION_API_URL = "http://127.0.0.1:11434/v1/chat/completions"; // local Ollama: allowed (warned)
     assert.equal(loadConfig().visionApiUrl, "http://127.0.0.1:11434/v1/chat/completions");
+  } finally {
+    process.env = saved;
+  }
+});
+
+// BYO-LLM think endpoint: fail loud on malformed config.
+test("DEEPGRAM_THINK_ENDPOINT_URL and _HEADERS are validated at config load", () => {
+  const saved = { ...process.env };
+  try {
+    process.env.WORKER_SHARED_SECRET = "s";
+    process.env.DEEPGRAM_API_KEY = "k";
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_URL = "not a url";
+    assert.throws(() => loadConfig(), /not a valid URL/);
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_URL = "http://llm.example.com/v1"; // http, not https
+    assert.throws(() => loadConfig(), /must be https/);
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_URL = "https://user:pass@llm.example.com/v1";
+    assert.throws(() => loadConfig(), /embedded credentials/);
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_URL = "https://llm.example.com/v1";
+    process.env.DEEPGRAM_THINK_ENDPOINT_HEADERS = "{not json";
+    assert.throws(() => loadConfig(), /not valid JSON/);
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_HEADERS = JSON.stringify({ authorization: 42 });
+    assert.throws(() => loadConfig(), /must be a string/);
+
+    process.env.DEEPGRAM_THINK_ENDPOINT_HEADERS = JSON.stringify({ authorization: "Bearer x" });
+    const cfg = loadConfig();
+    assert.equal(cfg.thinkEndpointUrl, "https://llm.example.com/v1");
+    assert.deepEqual(cfg.thinkEndpointHeaders, { authorization: "Bearer x" });
   } finally {
     process.env = saved;
   }

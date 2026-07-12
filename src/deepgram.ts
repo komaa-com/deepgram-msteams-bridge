@@ -105,13 +105,21 @@ export type DgInbound =
 
 // ---- built-in bridge functions ----
 
+/** A Settings agent.think.functions entry (no endpoint = client-side, answered by this bridge). */
+export interface DgFunctionSchema {
+  name: string;
+  description: string;
+  /** JSON schema for the parameters ({type: "object", properties, required}). */
+  parameters: Record<string, unknown>;
+}
+
 /**
  * Client-side functions registered on every session (declared in Settings
  * under agent.think.functions; entries WITHOUT an endpoint are executed by
  * this client via FunctionCallRequest/FunctionCallResponse). The bridge
  * implements their behavior; nothing to configure on the Deepgram side.
  */
-export const BRIDGE_FUNCTIONS: Array<Record<string, unknown>> = [
+export const BRIDGE_FUNCTIONS: DgFunctionSchema[] = [
   {
     name: "end_call",
     description:
@@ -187,7 +195,7 @@ export interface CustomTool {
 }
 
 /** The Settings functions entry for a custom tool (schema only; the handler stays bridge-side). */
-export function customToolSchema(tool: CustomTool): Record<string, unknown> {
+export function customToolSchema(tool: CustomTool): DgFunctionSchema {
   return { name: tool.name, description: tool.description, parameters: tool.parameters };
 }
 
@@ -231,10 +239,18 @@ export interface SettingsOptions {
   thinkProvider: string;
   thinkModel: string;
   speakModel: string;
+  /**
+   * BYO-LLM endpoint for agent.think - REQUIRED by Deepgram for third-party
+   * think providers (e.g. google, groq, aws_bedrock); Deepgram-managed
+   * open_ai/anthropic work without it. Null = omitted.
+   */
+  thinkEndpointUrl: string | null;
+  /** Headers for the think endpoint (e.g. {authorization: "Bearer ..."}). */
+  thinkEndpointHeaders: Record<string, string> | null;
   /** Deterministic opening line the agent speaks first. Omitted when null. */
   greeting: string | null;
   /** Extra client-side function schemas merged after the built-ins. */
-  extraFunctions?: Array<Record<string, unknown>>;
+  extraFunctions?: DgFunctionSchema[];
 }
 
 /**
@@ -243,15 +259,23 @@ export interface SettingsOptions {
  * relay, no transcoding), container "none" (raw frames).
  */
 export function buildSettings(opts: SettingsOptions): Record<string, unknown> {
+  // language lives on the listen/speak providers (the top-level agent.language
+  // field is deprecated in the Voice Agent API).
+  const think: Record<string, unknown> = {
+    provider: { type: opts.thinkProvider, model: opts.thinkModel },
+    prompt: opts.prompt,
+    functions: [...BRIDGE_FUNCTIONS, ...(opts.extraFunctions ?? [])],
+  };
+  if (opts.thinkEndpointUrl) {
+    think.endpoint = {
+      url: opts.thinkEndpointUrl,
+      ...(opts.thinkEndpointHeaders ? { headers: opts.thinkEndpointHeaders } : {}),
+    };
+  }
   const agent: Record<string, unknown> = {
-    language: opts.language,
-    listen: { provider: { type: "deepgram", model: opts.listenModel } },
-    think: {
-      provider: { type: opts.thinkProvider, model: opts.thinkModel },
-      prompt: opts.prompt,
-      functions: [...BRIDGE_FUNCTIONS, ...(opts.extraFunctions ?? [])],
-    },
-    speak: { provider: { type: "deepgram", model: opts.speakModel } },
+    listen: { provider: { type: "deepgram", model: opts.listenModel, language: opts.language } },
+    think,
+    speak: { provider: { type: "deepgram", model: opts.speakModel, language: opts.language } },
   };
   if (opts.greeting) {
     agent.greeting = opts.greeting;
@@ -404,6 +428,14 @@ export class DeepgramAgentSocket implements AgentPort {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("no Welcome from Deepgram within the timeout")), WELCOME_TIMEOUT_MS);
         timer.unref?.();
+        const onError = (err: Error): void => {
+          clearTimeout(timer);
+          reject(err);
+        };
+        const onCloseEarly = (code: number): void => {
+          clearTimeout(timer);
+          reject(new Error(`socket closed before Welcome (${code})`));
+        };
         const onMessage = (data: Buffer, isBinary: boolean): void => {
           if (isBinary) {
             return; // audio cannot arrive before Settings; ignore defensively
@@ -412,7 +444,13 @@ export class DeepgramAgentSocket implements AgentPort {
             const msg = JSON.parse(data.toString("utf8")) as { type?: string };
             if (msg.type === "Welcome") {
               clearTimeout(timer);
+              // Remove ALL handshake listeners: a stale once("close") would
+              // otherwise fire (a no-op reject on a settled promise) during
+              // every normal teardown, and a stale once("error") would race
+              // the real handler wired by connect().
               ws.off("message", onMessage);
+              ws.off("error", onError);
+              ws.off("close", onCloseEarly);
               resolve();
             }
           } catch {
@@ -420,14 +458,8 @@ export class DeepgramAgentSocket implements AgentPort {
           }
         };
         ws.on("message", onMessage);
-        ws.once("error", (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-        ws.once("close", (code) => {
-          clearTimeout(timer);
-          reject(new Error(`socket closed before Welcome (${code})`));
-        });
+        ws.once("error", onError);
+        ws.once("close", onCloseEarly);
       });
     } catch (err) {
       // The rejected socket is now orphaned. Without a permanent 'error'

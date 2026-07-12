@@ -26,12 +26,12 @@ The hot path is **copy-only**: the StandIn wire is base64 PCM 16 kHz mono and th
 ## Features
 
 - **Realtime voice, end to end** - the caller talks to your Deepgram agent and hears it reply. Turn-taking, VAD and interruption are the Voice Agent's own (server-side); the bridge adds nothing to the latency budget beyond a relay hop.
-- **No dashboard to configure** - the bridge configures each session itself from environment variables: STT model (`nova-3`), LLM (`open_ai/gpt-4o-mini` or any Deepgram-managed provider), voice (`aura-2-thalia-en`), prompt, greeting.
+- **No dashboard to configure** - the bridge configures each session itself from environment variables: STT model (`nova-3`), LLM (Deepgram-managed `open_ai`/`anthropic`, or any BYO provider via `DEEPGRAM_THINK_ENDPOINT_URL`), voice (`aura-2-thalia-en`), prompt, greeting.
 - **Barge-in done right** - when the caller interrupts (`UserStartedSpeaking`), the bridge cancels playback on the Teams side and ghost-drops in-flight agent audio until the agent's next utterance, so no stale audio plays after the cut.
 - **Per-call personalization** - caller name, tenant and call direction are injected into the agent prompt at session start; a deterministic greeting (`DEEPGRAM_GREETING`) doubles as a spoken AI disclosure.
 - **Built-in agent tools** - `end_call`, `express` (avatar emotion), `show_image` (image on the bot's video tile, SSRF-guarded), `look` (vision). Declared as client-side functions in every session; behavior is implemented by the bridge.
 - **Extensible tools** - register your own client-side function tools (`lookup_order`, `transfer_call`, ...) that the bridge executes in-process. See [Extending the agent's tools](#extending-the-agents-tools).
-- **Vision on demand** - the `look` tool answers from the caller's camera or screen-share via any OpenAI-compatible vision endpoint (the Voice Agent API is audio-only, so this is the one vision route; the raw frame never leaves the bridge).
+- **Vision on demand** - the `look` tool answers from the caller's camera or screen-share via any OpenAI-compatible vision endpoint (the Voice Agent API is audio-only, so this is the one vision route). Know the data flow: the raw frame IS sent to the vision endpoint YOU configure - never to Deepgram - and an optional `VISION_REQUIRES_RECORDING=true` gates it on Teams recording being active.
 - **Live context without interruptions** - participant counts, DTMF digits and active-speaker changes ride `UpdatePrompt` as a bounded rolling context section, so the agent knows what is happening without being interrupted.
 - **Two call governors** - a StandIn-side cutoff the bridge speaks a goodbye for, and a bridge-side `MAX_CALL_MINUTES` hard cap. The goodbye is the exact text: standalone Aura TTS when `DEEPGRAM_TTS_MODEL` is set, otherwise spoken by the live agent via `InjectAgentMessage`. Both paths are backstopped so a call can never sit open half-dead.
 - **Observability** - `GET /healthz` for liveness and `GET /metrics` (Prometheus text format): calls, durations, rejects, relay/drop counters.
@@ -134,9 +134,9 @@ Keep handlers fast (the caller is waiting on the answer) and enforce your own ti
 
 ## Vision (`look` tool)
 
-The Voice Agent API is audio-only, so the bridge answers the agent's `look` calls itself: the latest camera/screen-share frame goes to **your** OpenAI-compatible vision endpoint (`VISION_API_URL` / `VISION_MODEL`, or a custom `VisionDescriber` in code) and the text description returns as the function result. The **raw frame never leaves the bridge** - only the description does. Without a vision endpoint, `look` tells the agent vision is unavailable.
+The Voice Agent API is audio-only, so the bridge answers the agent's `look` calls itself: the latest camera/screen-share frame goes to **your** OpenAI-compatible vision endpoint (`VISION_API_URL` / `VISION_MODEL`, or a custom `VisionDescriber` in code) and the text description returns as the function result. Without a vision endpoint, `look` tells the agent vision is unavailable.
 
-Note the data flow: the description becomes Voice Agent conversation content, retained per your Deepgram data settings.
+**Know the data flow.** The raw frame is never sent to Deepgram - but it IS sent to the vision endpoint you configure (OpenAI, Azure, or a local Ollama/vLLM if you point `VISION_API_URL` at one). Camera and screen-share frames are PII-bearing in most jurisdictions: if your deployment requires consent signals before processing them, set `VISION_REQUIRES_RECORDING=true` and the bridge refuses to send any frame to the vision endpoint unless Teams recording is active. The returned description additionally becomes Voice Agent conversation content, retained per your Deepgram data settings. Run a local vision model if frames must not leave your infrastructure.
 
 ## Call governors
 
@@ -153,7 +153,13 @@ If the worker socket drops mid-call, the bridge tears the call down: the Voice A
 
 ## Privacy / recording gate
 
-StandIn reports the Teams recording state (`recording.status`). The bridge never logs or persists transcripts (`ConversationText`) unless `LOG_TRANSCRIPTS=true` **and** recording is `active`. Video frames are buffered in memory only and dropped at teardown. Caller audio and any vision descriptions transit Deepgram's cloud (and the configured think-provider) per your Deepgram data settings; disclose the AI on the call via `DEEPGRAM_GREETING`.
+StandIn reports the Teams recording state (`recording.status`). The bridge honors it:
+
+- Transcripts (`ConversationText`) are never logged or persisted unless `LOG_TRANSCRIPTS=true` **and** recording is `active`.
+- With `VISION_REQUIRES_RECORDING=true`, the `look` tool refuses to send caller video frames to the vision endpoint unless recording is `active` (off by default so vision stays usable without recording - an explicit trade-off; see Vision above).
+- Video frames are buffered in memory only and dropped at teardown.
+
+Caller audio and any vision descriptions transit Deepgram's cloud (and the configured think provider) per your Deepgram data settings; disclose the AI on the call via `DEEPGRAM_GREETING`. Regional routing: set `DEEPGRAM_AGENT_HOST=api.eu.deepgram.com` / `api.au.deepgram.com` (and the matching `DEEPGRAM_API_HOST`) to keep traffic in-region.
 
 ## Repository layout
 
