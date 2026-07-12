@@ -7,7 +7,9 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6.svg)](https://www.typescriptlang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-**`@komaa/deepgram-msteams-bridge`** puts a [Deepgram Voice Agent](https://developers.deepgram.com/docs/voice-agent) on a real **Microsoft Teams call**. The hosted **StandIn media bridge** ([standin.komaa.com](https://standin.komaa.com)) joins the Teams call and dials into this bridge over an HMAC-authenticated WebSocket; the bridge opens one Deepgram Voice Agent session per call (Nova STT + your chosen LLM + Aura TTS, all run by Deepgram) and relays between them.
+**`@komaa/deepgram-msteams-bridge`** puts a [Deepgram Voice Agent](https://developers.deepgram.com/docs/voice-agent) on a real **Microsoft Teams call**.
+
+> **Prefer Python?** The same bridge exists as a Python package: [`deepgram-msteams-bridge` on PyPI](https://pypi.org/project/deepgram-msteams-bridge/) ([repo](https://github.com/komaa-com/deepgram-msteams-bridge-py)) - same wire protocol, same environment variables, drop-in interchangeable behind the same `.env` file. The hosted **StandIn media bridge** ([standin.komaa.com](https://standin.komaa.com)) joins the Teams call and dials into this bridge over an HMAC-authenticated WebSocket; the bridge opens one Deepgram Voice Agent session per call (Nova STT + your chosen LLM + Aura TTS, all run by Deepgram) and relays between them.
 
 ```text
 Microsoft Teams call
