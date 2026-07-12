@@ -1,0 +1,17 @@
+{
+  "name": "basic-bridge-example",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Runnable example: embed @komaa/deepgram-msteams-bridge with a custom vision hook.",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env index.mjs"
+  },
+  "dependencies": {
+    "@komaa/deepgram-msteams-bridge": "file:../..",
+    "openai": "^4.77.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
