@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/komaa-com/deepgram-msteams-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/komaa-com/deepgram-msteams-bridge/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@komaa/deepgram-msteams-bridge.svg)](https://www.npmjs.com/package/@komaa/deepgram-msteams-bridge)
+[![docs](https://img.shields.io/badge/docs-komaa--com.github.io-2563eb.svg)](https://komaa-com.github.io/deepgram-msteams-bridge/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6.svg)](https://www.typescriptlang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
@@ -174,11 +175,13 @@ src/
   vision.ts      describe-then-answer vision hook
   config.ts      env config (fail-loud numeric parsing, host allowlists)
 examples/        runnable example projects
+website/         docs site (Astro Starlight), deployed to GitHub Pages
 test/            node:test suites (run with tsx; no Deepgram account needed)
 ```
 
 ## Documentation
 
+- **Docs site:** [komaa-com.github.io/deepgram-msteams-bridge](https://komaa-com.github.io/deepgram-msteams-bridge/) - getting started, architecture, configuration and library API reference, wire protocol, tool extensibility, troubleshooting.
 - **Example project:** [`examples/basic-bridge/`](./examples/basic-bridge/) - a runnable embedding with a custom vision hook and a custom tool.
 - **StandIn (the hosted service):** [standin.komaa.com](https://standin.komaa.com) · [docs.komaa.com](https://docs.komaa.com).
 - **Siblings:** the same bridge exists for [ElevenLabs](https://github.com/komaa-com/elevenlabs-msteams-bridge), [LiveKit](https://github.com/komaa-com/livekit-msteams-bridge), and [OpenAI Realtime](https://github.com/komaa-com/openai-msteams-bridge) - same wire protocol, same hardening, pick the agent platform that fits.

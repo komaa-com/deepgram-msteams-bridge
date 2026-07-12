@@ -1,0 +1,39 @@
+// Docs site for @komaa/deepgram-msteams-bridge, published to GitHub Pages by .github/workflows/docs.yml.
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+import mermaid from "astro-mermaid";
+
+export default defineConfig({
+  site: "https://komaa-com.github.io",
+  base: "/deepgram-msteams-bridge",
+  integrations: [
+    // Client-side Mermaid rendering (theme-aware, offline). Must come BEFORE starlight.
+    mermaid({ theme: "default", autoTheme: true }),
+    starlight({
+      title: "Microsoft Teams Bridge for Deepgram Voice Agents",
+      description:
+        "Put a Deepgram Voice Agent (Nova STT + LLM + Aura TTS) on a real Microsoft Teams call: copy-only 16 kHz relay, barge-in, extensible client-side tools, vision on demand, and call governors, connected through the StandIn media bridge.",
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/komaa-com/deepgram-msteams-bridge",
+        },
+      ],
+      sidebar: [
+        { label: "Overview", link: "/" },
+        { label: "Getting Started", link: "/getting-started/" },
+        { label: "Connecting to StandIn", link: "/connecting-to-standin/" },
+        { label: "Architecture", link: "/architecture/" },
+        { label: "Configuration Reference", link: "/configuration-reference/" },
+        { label: "Library API", link: "/library-api/" },
+        { label: "Wire Protocol", link: "/wire-protocol/" },
+        { label: "Vision and Tools", link: "/vision-and-tools/" },
+        { label: "Extending the Agent's Tools", link: "/extending-tools/" },
+        { label: "Governors and Privacy", link: "/governors-and-privacy/" },
+        { label: "Troubleshooting", link: "/troubleshooting/" },
+        { label: "Contributing", link: "/contributing/" },
+      ],
+    }),
+  ],
+});

@@ -23,7 +23,7 @@
   "bugs": {
     "url": "https://github.com/komaa-com/deepgram-msteams-bridge/issues"
   },
-  "homepage": "https://github.com/komaa-com/deepgram-msteams-bridge#readme",
+  "homepage": "https://komaa-com.github.io/deepgram-msteams-bridge/",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
