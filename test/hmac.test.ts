@@ -20,7 +20,7 @@ test("verify accepts correct and rejects tampered signatures", () => {
   const callId = "call-123";
   const sig = sign(secret, ts, callId);
   assert.equal(verify(secret, ts, callId, sig), true);
-  assert.equal(verify(secret, ts, callId, sig.toUpperCase()), true); // case-insensitive like the C# side
+  assert.equal(verify(secret, ts, callId, sig.toUpperCase()), true); // hex signatures compare case-insensitively
   assert.equal(verify(secret, ts + 1, callId, sig), false);
   assert.equal(verify(secret, ts, "other-call", sig), false);
   assert.equal(verify("wrong", ts, callId, sig), false);

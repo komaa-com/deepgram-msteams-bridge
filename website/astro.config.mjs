@@ -10,6 +10,15 @@ export default defineConfig({
     // Client-side Mermaid rendering (theme-aware, offline). Must come BEFORE starlight.
     mermaid({ theme: "default", autoTheme: true }),
     starlight({
+      head: [
+        // Google Analytics 4 (shared StandIn property; filter by hostname in GA).
+        { tag: "script", attrs: { async: true, src: "https://www.googletagmanager.com/gtag/js?id=G-M02N9C42XH" } },
+        {
+          tag: "script",
+          content:
+            "window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-M02N9C42XH');",
+        },
+      ],
       title: "Microsoft Teams Bridge for Deepgram Voice Agents",
       description:
         "Put a Deepgram Voice Agent (Nova STT + LLM + Aura TTS) on a real Microsoft Teams call: copy-only 16 kHz relay, barge-in, extensible client-side tools, vision on demand, and call governors, connected through the StandIn media bridge.",
